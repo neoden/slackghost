@@ -11,6 +11,7 @@ import websockets
 
 
 API_URL = 'https://slack.com/api/'
+POLLING_INTERVAL = 0.1
 
 
 def method_url(name):
@@ -19,23 +20,29 @@ def method_url(name):
 
 class Bot():
     def __init__(self, data):
-        self.url = data['url']
-        self.id = data['self']['id']
-        self.name = data['self']['name']
-        print('I am {}. My ID is {}'.format(self.name, self.id))
-
+        try:
+            self.url = data['url']
+            self.id = data['self']['id']
+            self.name = data['self']['name']
+            print('I am {}. My ID is {}'.format(self.name, self.id))
+        except KeyError as e:
+            print('Bot initialization failed')
+            raise e
+        
     def handle(self, event):
         pprint(event)
         if event.get('type') == 'message':
             return self.handle_message(event)
 
     def handle_message(self, event):
-        if re.search('<@{}>'.format(self.id), event['text']):
+        text = event.get('text')
+        user = event.get('user')
+        if text and user and re.search('<@{}>'.format(self.id), text):
             print('I was mentioned in a message')
             return json.dumps({
                 'type': 'message',
                 'channel': event['channel'],
-                'text': 'привет <@{}>'.format(event['user'])
+                'text': 'привет <@{}>'.format(user)
             })
 
 
@@ -49,7 +56,7 @@ def listen(bot):
         if r:
             yield from websocket.send(r)
 
-        time.sleep(0.1)
+        time.sleep(POLLING_INTERVAL)
 
     yield from websocket.close()
 
@@ -68,7 +75,6 @@ def main(token):
             print('Connection failed with error: {}'.format(r.get('error')))
     else:
         print(response.status_code)
-
 
 
 
