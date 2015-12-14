@@ -4,6 +4,8 @@ import requests
 import json
 import time
 import re
+import signal
+import functools
 from pprint import pprint
 
 import asyncio
@@ -11,7 +13,10 @@ import websockets
 
 
 API_URL = 'https://slack.com/api/'
-POLLING_INTERVAL = 0.1
+
+
+class Shutdown(Exception):
+    pass
 
 
 def method_url(name):
@@ -30,9 +35,16 @@ class Bot():
             raise e
         
     def handle(self, event):
+        global pings
+
         pprint(event)
-        if event.get('type') == 'message':
+        event_type = event.get('type')
+        if event_type == 'message':
             return self.handle_message(event)
+        elif event_type == 'pong':
+            print('pong')
+            pings.pop(event.get('reply_to'))
+
 
     def handle_message(self, event):
         text = event.get('text')
@@ -45,20 +57,42 @@ class Bot():
                 'text': 'привет <@{}>'.format(user)
             })
 
+ping_handle = None
+pings = {}
 
-@asyncio.coroutine
-def listen(bot):
-    websocket = yield from websockets.connect(bot.url)
+def ping(loop, websocket):
+    global ping_handle
+    global ping_id
+
+    if len(pings) > 0:
+        # опа, за 5 сек pong не вернулся
+        print('alarm!')
+    else:
+        print('ping')
+        ping_id = int(loop.time())
+        pings[ping_id] = True
+
+        msg = json.dumps({'id': ping_id, 'type': 'ping'})
+        asyncio.ensure_future(websocket.send(msg))
+        ping_handle = loop.call_later(5, ping, loop, websocket)
+
+
+
+async def listen(bot, loop):
+    global ping_handle
+
+    websocket = await websockets.connect(bot.url)
 
     while True:
-        event = yield from websocket.recv()
+        ping_handle = loop.call_later(5, ping, loop, websocket)
+        event = await websocket.recv()
+        ping_handle.cancel()
+
         r = bot.handle(json.loads(event))
         if r:
-            yield from websocket.send(r)
+            await websocket.send(r)
 
-        time.sleep(POLLING_INTERVAL)
-
-    yield from websocket.close()
+    await websocket.close()
 
 
 def main(token):
@@ -70,7 +104,9 @@ def main(token):
         if ok:
             websocket_url = r['url']
             bot = Bot(r)
-            asyncio.get_event_loop().run_until_complete(listen(bot))
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(listen(bot, loop))
+
         else:
             print('Connection failed with error: {}'.format(r.get('error')))
     else:
