@@ -35,8 +35,6 @@ class Bot():
             raise e
         
     def handle(self, event):
-        global pings
-
         pprint(event)
         event_type = event.get('type')
         if event_type == 'message':
@@ -62,7 +60,6 @@ pings = {}
 
 def ping(loop, websocket):
     global ping_handle
-    global ping_id
 
     if len(pings) > 0:
         # опа, за 5 сек pong не вернулся
@@ -106,7 +103,6 @@ def main(token):
             bot = Bot(r)
             loop = asyncio.get_event_loop()
             loop.run_until_complete(listen(bot, loop))
-
         else:
             print('Connection failed with error: {}'.format(r.get('error')))
     else:
