@@ -81,13 +81,17 @@ async def listen(bot, loop):
     websocket = await websockets.connect(bot.url)
 
     while True:
-        ping_handle = loop.call_later(5, ping, loop, websocket)
-        event = await websocket.recv()
-        ping_handle.cancel()
+        try:
+            ping_handle = loop.call_later(5, ping, loop, websocket)
+            event = await websocket.recv()
+            ping_handle.cancel()
 
-        r = bot.handle(json.loads(event))
-        if r:
-            await websocket.send(r)
+            r = bot.handle(json.loads(event))
+            if r:
+                await websocket.send(r)
+        except KeyboardInterrupt:
+            ping_handle.cancel()
+            break
 
     await websocket.close()
 
