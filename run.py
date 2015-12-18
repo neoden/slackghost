@@ -5,6 +5,7 @@ import json
 import time
 import re
 import signal
+import os
 from functools import partial
 from pprint import pprint
 
@@ -20,6 +21,7 @@ class Shutdown(Exception):
 
 ping_handle = None
 pings = {}
+config = None
 
 user_id = None
 
@@ -33,7 +35,8 @@ def report(event):
 
 
 def archive(event):
-    print('Archived: ' + str(event))
+    with open(config.log, 'a') as f:
+        f.write(str(event) + '\n')
 
 
 def handle_message(event):
@@ -107,11 +110,26 @@ async def listen(url, loop):
     await websocket.close()
 
 
+def load_config():
+    from importlib.machinery import SourceFileLoader
+    try:
+        conf = SourceFileLoader('conf', 'ghost.conf').load_module()
+        return conf
+    except FileNotFoundError:
+        print('Config not found')
 
-def main(token):
+
+def main():
     global user_id
+    global config
 
-    response = requests.get(method_url('rtm.start'), params={'token': token})
+    config = load_config()
+
+    d, f = os.path.split(config.log)
+    if not os.path.isdir(d):
+        os.makedirs(d)
+
+    response = requests.get(method_url('rtm.start'), params={'token': config.token})
 
     if response.status_code == 200:
         r = json.loads(response.text)
@@ -196,5 +214,4 @@ EVENT_TYPES = {
 
 
 if __name__ == '__main__':
-    token = open('token.txt').read().strip()
-    main(token)
+    main()
