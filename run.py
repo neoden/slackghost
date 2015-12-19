@@ -43,10 +43,7 @@ def handle_message(event):
     text = event.get('text')
     user = event.get('user')
 
-    if not event.get('hidden'):
-        archive(event)
-    else:
-        report(event)
+    archive(event)
 
     if text and user and re.search('<@{}>'.format(user_id), text):
         message = json.dumps({
