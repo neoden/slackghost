@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VENVDIR=/srv/venv/slack
+VENVDIR=/opt/venv/slack
 BINDIR=/srv/ghost
 
 cd $BINDIR
