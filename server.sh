@@ -5,4 +5,4 @@ BINDIR=/srv/ghost
 
 cd $BINDIR
 source $VENVDIR/bin/activate
-$BINDIR/webserver.py
+$BINDIR/run.py
