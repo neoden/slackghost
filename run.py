@@ -2,212 +2,242 @@
 
 import requests
 import json
-import time
 import re
-import signal
 import os
-from functools import partial
-from pprint import pprint
-
+import logging
+import motor.motor_asyncio
 import asyncio
 import websockets
 
 
-API_URL = 'https://slack.com/api/'
 
-class Shutdown(Exception):
-    pass
+class GhostApp:
+    EVENT_HANDLERS = {
+        'hello': 'report',
+        'message': 'handle_message',
+        'user_typing': 'ignore',
+        'channel_marked': 'report',
+        'channel_created': 'report',
+        'channel_joined': 'report',
+        'channel_left': 'report',
+        'channel_deleted': 'report',
+        'channel_rename': 'report',
+        'channel_archive': 'report',
+        'channel_unarchive': 'report',
+        'channel_history_changed': 'report',
+        'im_created': 'report',
+        'im_open': 'report',
+        'im_close': 'report',
+        'im_marked': 'report',
+        'im_history_changed': 'report',
+        'group_joined': 'report',
+        'group_left': 'report',
+        'group_open': 'report',
+        'group_close': 'report',
+        'group_archive': 'report',
+        'group_unarchive': 'report',
+        'group_rename': 'report',
+        'group_marked': 'report',
+        'group_history_changed': 'report',
+        'file_created': 'archive',
+        'file_shared': 'archive',
+        'file_unshared': 'archive',
+        'file_public': 'archive',
+        'file_private': 'archive',
+        'file_change': 'archive',
+        'file_deleted': 'archive',
+        'file_comment_added': 'archive',
+        'file_comment_edited': 'archive',
+        'file_comment_deleted': 'archive',
+        'pin_added': 'report',
+        'pin_removed': 'report',
+        'presence_change': 'report',
+        'manual_presence_change': 'report',
+        'pref_change': 'report',
+        'user_change': 'refresh',
+        'team_join': 'refresh',
+        'star_added': 'archive',
+        'star_removed': 'archive',
+        'reaction_added': 'archive',
+        'reaction_removed': 'archive',
+        'emoji_changed': 'ignore',
+        'commands_changed': 'ignore',
+        'team_plan_change': 'ignore',
+        'team_pref_change': 'refresh',
+        'team_rename': 'refresh',
+        'team_domain_change': 'refresh',
+        'email_domain_changed': 'refresh',
+        'bot_added': 'refresh',
+        'bot_changed': 'refresh',
+        'accounts_changed': 'refresh',
+        'team_migration_started': 'report',
+        'subteam_created': 'archive',
+        'subteam_updated': 'archive',
+        'subteam_self_added': 'report',
+        'subteam_self_removed': 'report',
+        'pong': 'pong'
+    }
 
+    API_URL = 'https://slack.com/api/'
 
-ping_handle = None
-pings = {}
-config = None
+    def __init__(self):
+        self.config = {
+            'DB_URI': 'mongodb://localhost:27017',
+            'DB_NAME': 'ghost',
+            'TOKEN': None,
+            'DEBUG': False
+        }
+        self.websocket_url = None
+        self.user_id = None
+        self.loop = None
+        self.db = None
+        self.EVENT_HANDLERS = {k: getattr(self, v) for k, v in self.EVENT_HANDLERS.items()}
 
-user_id = None
+        self._ping_handle = None
+        self._pings = {}
 
+    def load_config(self, path):
+        from importlib.machinery import SourceFileLoader
+        try:
+            conf = SourceFileLoader('conf', path).load_module()
+            for key in dir(conf):
+                if key.isupper():
+                    self.config[key] = getattr(conf, key)
+        except FileNotFoundError:
+            print('Config file not found')
 
-def ignore(event):
-    pass
+    def _method_url(self, name):
+        return self.API_URL + name
 
+    def init_logging(self):
+        self.log = logging.getLogger('ghost')
+        self.log.setLevel(logging.DEBUG)
 
-def report(event):
-    print(event)
+        console_handler = logging.StreamHandler()
 
+        if self.config['DEBUG']:
+            console_handler.setLevel(logging.DEBUG)
+        else:
+            console_handler.setLevel(logging.ERROR)
 
-def archive(event):
-    with open(config.log, 'a') as f:
-        f.write(str(event) + '\n')
+        formatter = logging.Formatter('%(asctime)s %(levelname)s: \033[33m%(message)s\033[0m [in %(pathname)s:%(lineno)d]')
+        console_handler.setFormatter(formatter)
 
+        self.log.addHandler(console_handler)
 
-def handle_message(event):
-    text = event.get('text')
-    user = event.get('user')
+    def before_run(self):
+        self.init_logging()        
 
-    archive(event)
+    def run(self):
+        self.before_run()
 
-    if text and user and re.search('<@{}>'.format(user_id), text):
-        message = json.dumps({
-            'type': 'message',
-            'channel': event['channel'],
-            'text': 'привет <@{}>'.format(user)
-        })
-        return message
+        if not self.config['TOKEN']:
+            self.log.critical('Authentication token not set')
+            return
 
+        self.db_instance = motor.motor_asyncio.AsyncIOMotorClient(self.config['DB_URI'])
+        self.db = self.db_instance[self.config['DB_NAME']]
 
-def refresh():
-    pass
+        response = requests.get(self._method_url('rtm.start'), params={'token': self.config['TOKEN']})
 
+        if response.status_code == 200:
+            r = json.loads(response.text)
+            if r.get('ok'):
+                self.log.info('Slack API responded')
 
-def pong(event):
-    pings.pop(event.get('reply_to'))
+                self.websocket_url = r['url']
+                self.user_id = r['self']['id']
+                self.loop = asyncio.get_event_loop()
+                self.loop.run_until_complete(self.listen())
+            else:
+                self.log.error('rtm.start failed with error: {}'.format(r.get('error')))
+        else:
+            self.log.error('rtm.start failed with status code {}'.format(response.status_code))
 
+    async def listen(self):
+        self.websocket = await websockets.connect(self.websocket_url)
 
-def method_url(name):
-    return API_URL + name
+        self.log.info('Connection established. Listening for events...')
 
+        while True:
+            self._ping_handle = self.loop.call_later(5, self.ping)
+            event_json = await self.websocket.recv()
+            self._ping_handle.cancel()
 
-def ping(loop, websocket):
-    global ping_handle
+            event = json.loads(event_json)
+            event_type = event.get('type')
 
-    if len(pings) > 0:
-        # опа, за 5 сек pong не вернулся
-        print('alarm!')
-    else:
-        ping_id = int(loop.time())
-        pings[ping_id] = True
+            if event_type:
+                try:
+                    action = self.EVENT_HANDLERS[event_type]
+                except KeyError:
+                    self.log.error('Unknown envent type {} in event {}'.format(event_type, event))
+            
+                message = action(event)
+                if message:
+                    await self.websocket.send(message)
 
-        msg = json.dumps({'id': ping_id, 'type': 'ping'})
-        asyncio.ensure_future(websocket.send(msg))
-        ping_handle = loop.call_later(5, ping, loop, websocket)
+        await self.websocket.close()
 
+    def ping(self):
+        if len(self._pings) > 0:
+            self.log.warning('Ping did not return within a given timeout')
+            # TODO: handle ping fails
+        else:
+            ping_id = int(self.loop.time())
+            self._pings[ping_id] = True
 
-async def listen(url, loop):
-    global ping_handle
+            msg = json.dumps({'id': ping_id, 'type': 'ping'})
+            asyncio.ensure_future(self.websocket.send(msg))
+            self._ping_handle = self.loop.call_later(5, self.ping)
+            self.log.debug('Ping: {}'.format(msg))
 
-    websocket = await websockets.connect(url)
+    def ignore(self, event):
+        self.log.debug('Event ignored: {}'.format(event))
 
-    while True:
-        ping_handle = loop.call_later(5, ping, loop, websocket)
-        event_json = await websocket.recv()
-        ping_handle.cancel()
+    def report(self, event):
+        self.log.info('Event report: {}'.format(event))
 
-        event = json.loads(event_json)
-        event_type = event.get('type')
+    def archive(self, event):
+        asyncio.ensure_future(self.store_event(event))
 
-        if event_type:
-            try:
-                action = EVENT_TYPES[event_type]['action']
-            except KeyError:
-                print('Unknown envent type {} in event {}'.format(event_type, event))
-        
-            message = action(event)
-            if message:
-                await websocket.send(message)
+    async def store_event(self, event):
+        if event['ts']:
+            event['ts'] = float(event['ts'])
+            result = await self.db.event_log.insert(event)
+            if not result:
+                self.log.error('Database insert failed with error {}:{}'.format(
+                    result.writeError.code, result.writeError.errmsg))
+        else:
+            self.log.warning('Event does not have a timestamp and will be skipped: {}'.format(event))
 
-    await websocket.close()
+    def handle_message(self, event):
+        text = event.get('text')
+        user = event.get('user')
 
+        self.archive(event)
 
-def load_config():
-    from importlib.machinery import SourceFileLoader
-    try:
-        conf = SourceFileLoader('conf', 'ghost.conf').load_module()
-        return conf
-    except FileNotFoundError:
-        print('Config not found')
+        if text and user and re.search('<@{}>'.format(self.user_id), text):
+            message = json.dumps({
+                'type': 'message',
+                'channel': event['channel'],
+                'text': 'привет <@{}>'.format(user)
+            })
+            return message
+
+    def refresh(self):
+        # TODO: reload main info
+        pass
+
+    def pong(self, event):
+        self._pings.pop(event.get('reply_to'))
+        self.log.debug('Pong: {}'.format(event))
 
 
 def main():
-    global user_id
-    global config
-
-    config = load_config()
-
-    d, f = os.path.split(config.log)
-    if not os.path.isdir(d):
-        os.makedirs(d)
-
-    response = requests.get(method_url('rtm.start'), params={'token': config.token})
-
-    if response.status_code == 200:
-        r = json.loads(response.text)
-        ok = r.get('ok')
-        if ok:
-            websocket_url = r['url']
-            user_id = r['self']['id']
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(listen(websocket_url, loop))
-
-        else:
-            print('Connection failed with error: {}'.format(r.get('error')))
-    else:
-        print(response.status_code)
-
-
-EVENT_TYPES = {
-    'hello': {'action': report},
-    'message': {'action': handle_message},
-    'user_typing': {'action': ignore},
-    'channel_marked': {'action': report},
-    'channel_created': {'action': report},
-    'channel_joined': {'action': report},
-    'channel_left': {'action': report},
-    'channel_deleted': {'action': report},
-    'channel_rename': {'action': report},
-    'channel_archive': {'action': report},
-    'channel_unarchive': {'action': report},
-    'channel_history_changed': {'action': report},
-    'im_created': {'action': report},
-    'im_open': {'action': report},
-    'im_close': {'action': report},
-    'im_marked': {'action': report},
-    'im_history_changed': {'action': report},
-    'group_joined': {'action': report},
-    'group_left': {'action': report},
-    'group_open': {'action': report},
-    'group_close': {'action': report},
-    'group_archive': {'action': report},
-    'group_unarchive': {'action': report},
-    'group_rename': {'action': report},
-    'group_marked': {'action': report},
-    'group_history_changed': {'action': report},
-    'file_created': {'action': archive},
-    'file_shared': {'action': archive},
-    'file_unshared': {'action': archive},
-    'file_public': {'action': archive},
-    'file_private': {'action': archive},
-    'file_change': {'action': archive},
-    'file_deleted': {'action': archive},
-    'file_comment_added': {'action': archive},
-    'file_comment_edited': {'action': archive},
-    'file_comment_deleted': {'action': archive},
-    'pin_added': {'action': report},
-    'pin_removed': {'action': report},
-    'presence_change': {'action': report},
-    'manual_presence_change': {'action': report},
-    'pref_change': {'action': report},
-    'user_change': {'action': refresh},
-    'team_join': {'action': refresh},
-    'star_added': {'action': archive},
-    'star_removed': {'action': archive},
-    'reaction_added': {'action': archive},
-    'reaction_removed': {'action': archive},
-    'emoji_changed': {'action': ignore},
-    'commands_changed': {'action': ignore},
-    'team_plan_change': {'action': ignore},
-    'team_pref_change': {'action': refresh},
-    'team_rename': {'action': refresh},
-    'team_domain_change': {'action': refresh},
-    'email_domain_changed': {'action': refresh},
-    'bot_added': {'action': refresh},
-    'bot_changed': {'action': refresh},
-    'accounts_changed': {'action': refresh},
-    'team_migration_started': {'action': report},
-    'subteam_created': {'action': archive},
-    'subteam_updated': {'action': archive},
-    'subteam_self_added': {'action': report},
-    'subteam_self_removed': {'action': report},
-    'pong': {'action': pong}
-}
+    app = GhostApp()
+    app.load_config('ghost.conf')
+    app.run()
 
 
 if __name__ == '__main__':
