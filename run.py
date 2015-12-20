@@ -139,13 +139,12 @@ class GhostApp:
 
     def _parse_rtm_start(self, response):
         by_name = {c['name']: c['id'] for c in response['channels']}
-        by_id = {c['id']: c['name'] for c in response['channels']}
 
         self.channels = []
         for c in self.config['CHANNELS']:
             if c in by_name:
                 self.channels.append(by_name[c])
-            if c in by_id:
+            else:
                 self.channels.append(c)
 
         self.websocket_url = response['url']
