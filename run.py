@@ -6,6 +6,7 @@ import re
 import os
 import logging
 import motor.motor_asyncio
+import pymongo
 import asyncio
 import websockets
 
@@ -85,7 +86,9 @@ class GhostApp:
             'DB_URI': 'mongodb://localhost:27017',
             'DB_NAME': 'ghost',
             'TOKEN': None,
-            'DEBUG': False
+            'DEBUG': False,
+            'PING_ENABLED': True,
+            'CHANNELS': []
         }
         self.websocket_url = None
         self.user_id = None
@@ -125,8 +128,28 @@ class GhostApp:
 
         self.log.addHandler(console_handler)
 
+    def init_db(self):
+        client = pymongo.MongoClient(self.config["DB_URI"])
+        client.ghost.event_log.create_index([('ts', pymongo.ASCENDING)])
+        client.ghost.event_log.create_index([('text', pymongo.TEXT)], default_language='russian', background=True)
+
     def before_run(self):
-        self.init_logging()        
+        self.init_logging()
+        self.init_db()
+
+    def _parse_rtm_start(self, response):
+        by_name = {c['name']: c['id'] for c in response['channels']}
+        by_id = {c['id']: c['name'] for c in response['channels']}
+
+        self.channels = []
+        for c in self.config['CHANNELS']:
+            if c in by_name:
+                self.channels.append(by_name[c])
+            if c in by_id:
+                self.channels.append(c)
+
+        self.websocket_url = response['url']
+        self.user_id = response['self']['id']
 
     def run(self):
         self.before_run()
@@ -144,9 +167,7 @@ class GhostApp:
             r = json.loads(response.text)
             if r.get('ok'):
                 self.log.info('Slack API responded')
-
-                self.websocket_url = r['url']
-                self.user_id = r['self']['id']
+                self._parse_rtm_start(r)
                 self.loop = asyncio.get_event_loop()
                 self.loop.run_until_complete(self.listen())
             else:
@@ -160,9 +181,13 @@ class GhostApp:
         self.log.info('Connection established. Listening for events...')
 
         while True:
-            self._ping_handle = self.loop.call_later(5, self.ping)
+            if self.config['PING_ENABLED']:
+                self._ping_handle = self.loop.call_later(5, self.ping)
+
             event_json = await self.websocket.recv()
-            self._ping_handle.cancel()
+
+            if self.config['PING_ENABLED']:
+                self._ping_handle.cancel()
 
             event = json.loads(event_json)
             event_type = event.get('type')
@@ -212,6 +237,10 @@ class GhostApp:
             self.log.warning('Event does not have a timestamp and will be skipped: {}'.format(event))
 
     def handle_message(self, event):
+        channel = event.get('channel')
+        if channel not in self.channels:
+            return
+
         text = event.get('text')
         user = event.get('user')
 
