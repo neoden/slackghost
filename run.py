@@ -79,6 +79,11 @@ class GhostApp:
         'pong': 'pong'
     }
 
+    COMMANDS = {
+        'wiki_ru': {'keywords': ['вики', 'википедия']},
+        'wiki_en': {'keywords': ['wiki', 'wikipedia']}
+    }
+
     API_URL = 'https://slack.com/api/'
 
     def __init__(self):
@@ -196,7 +201,7 @@ class GhostApp:
                     action = self.EVENT_HANDLERS[event_type]
                 except KeyError:
                     self.log.error('Unknown envent type {} in event {}'.format(event_type, event))
-            
+
                 message = action(event)
                 if message:
                     await self.websocket.send(message)
@@ -245,21 +250,52 @@ class GhostApp:
 
         self.archive(event)
 
-        if text and user and re.search('<@{}>'.format(self.user_id), text):
-            message = json.dumps({
-                'type': 'message',
-                'channel': event['channel'],
-                'text': 'привет <@{}>'.format(user)
-            })
-            return message
+        user_tag = '<@{}>'.format(self.user_id)
+
+        if text and user and re.search(user_tag, text):
+            words = text.split(' ')
+            for name, cmd in self.COMMANDS.items():
+                for w in words:
+                    if w in cmd['keywords']:
+                        handler = getattr(self, 'cmd_' + name)
+                        arg = ' '.join([i for i in words if i not in (w, user_tag, user_tag+':')])
+                        handler(event, w, arg)
+
+            reply_back(event, user)
 
     def refresh(self):
         # TODO: reload main info
         pass
 
-    def pong(self, event):
+    def pong(self, event, arg):
         self._pings.pop(event.get('reply_to'))
         self.log.debug('Pong: {}'.format(event))
+
+    async def send_message(self, channel, text):
+        message = json.dumps({
+            'type': 'message',
+            'channel': channel,
+            'text': text
+        })
+        await self.websocket.send(message)
+
+    def reply_back(self, event, user):
+        message = json.dumps({
+            'type': 'message',
+            'channel': event['channel'],
+            'text': 'привет <@{}>'.format(user)
+        })
+        return message
+
+    def cmd_wiki_ru(self, event, keyword, arg):
+        wiki_url = 'https://ru.wikipedia.org/w/api.php?action=query&prop=info&titles={}&inprop=url&format=json'.format(arg)
+
+        message = json.dumps({
+            'type': 'message',
+            'channel': event['channel'],
+            'text': 'keyword: {}  arg: {}'.format(keyword, arg)
+        })
+        return message
 
 
 def main():
